@@ -139,11 +139,11 @@ daemon_init(void)
 	umask(0);		/* clear our file mode creation mask */
     flock_reg ();
 
-    fd0 = open ("/dev/null", O_RDWR);
+/*    fd0 = open ("/dev/null", O_RDWR);
     dup2 (fd0, STDIN_FILENO);
     dup2 (fd0, STDERR_FILENO);
     dup2 (fd0, STDOUT_FILENO);
-    close (fd0);
+    close (fd0);*/
 }
 
 
