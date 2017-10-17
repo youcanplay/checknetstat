@@ -1,0 +1,15 @@
+eclipse.preferences.version=1
+environment/project/cdt.managedbuild.config.gnu.cross.exe.release.1455462039/CPLUS_INCLUDE_PATH/delimiter=\:
+environment/project/cdt.managedbuild.config.gnu.cross.exe.release.1455462039/CPLUS_INCLUDE_PATH/operation=append
+environment/project/cdt.managedbuild.config.gnu.cross.exe.release.1455462039/CPLUS_INCLUDE_PATH/value=/usr/local/include
+environment/project/cdt.managedbuild.config.gnu.cross.exe.release.1455462039/C_INCLUDE_PATH/delimiter=\:
+environment/project/cdt.managedbuild.config.gnu.cross.exe.release.1455462039/C_INCLUDE_PATH/operation=append
+environment/project/cdt.managedbuild.config.gnu.cross.exe.release.1455462039/C_INCLUDE_PATH/value=/usr/local/include
+environment/project/cdt.managedbuild.config.gnu.cross.exe.release.1455462039/LIBS/delimiter=\:
+environment/project/cdt.managedbuild.config.gnu.cross.exe.release.1455462039/LIBS/operation=append
+environment/project/cdt.managedbuild.config.gnu.cross.exe.release.1455462039/LIBS/value=/home/hwy/openwrt/sdk/OpenWrt-SDK-15.05-ramips-mt7620_gcc-4.8-linaro_uClibc-0.9.33.2.Linux-x86_64/staging_dir/target-mipsel_24kec+dsp_uClibc-0.9.33.2/usr/lib/
+environment/project/cdt.managedbuild.config.gnu.cross.exe.release.1455462039/STAGING_DIR/delimiter=\:
+environment/project/cdt.managedbuild.config.gnu.cross.exe.release.1455462039/STAGING_DIR/operation=append
+environment/project/cdt.managedbuild.config.gnu.cross.exe.release.1455462039/STAGING_DIR/value=/home/hwy/openwrt/sdk/OpenWrt-SDK-15.05-ramips-mt7620_gcc-4.8-linaro_uClibc-0.9.33.2.Linux-x86_64/staging_dir/target-mipsel_24kec+dsp_uClibc-0.9.33.2
+environment/project/cdt.managedbuild.config.gnu.cross.exe.release.1455462039/append=true
+environment/project/cdt.managedbuild.config.gnu.cross.exe.release.1455462039/appendContributed=true

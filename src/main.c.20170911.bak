@@ -1,0 +1,618 @@
+/*
+ * =====================================================================================
+ *
+ *       Filename:  main.c
+ *
+ *    Description:  main control for NetReconnect.
+ *
+ *        Version:  1.0
+ *        Created:  07/06/2009 03:53:22 PM
+ *       Revision:  none
+ *       Compiler:  gcc
+ *
+ *         Author:  BOYPT (PT), pentie@gmail.com
+ *        Company:  http://apt-blog.co.cc
+ *
+ * =====================================================================================
+ */
+
+#include <assert.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <signal.h>
+#include <unistd.h>
+#include <string.h>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <sys/shm.h>
+#include <time.h>
+
+#include <stdint.h>
+#include <sys/mman.h>
+#include <sys/types.h>
+
+
+#define MMAP_PATH	"/dev/mem"
+
+
+#define RALINK_GPIO_DIR_IN		0
+#define RALINK_GPIO_DIR_OUT		1
+
+#define RALINK_REG_PIOINT		0x690
+#define RALINK_REG_PIOEDGE		0x6A0
+#define RALINK_REG_PIORENA		0x650
+#define RALINK_REG_PIOFENA		0x660
+#define RALINK_REG_PIODATA		0x620
+#define RALINK_REG_PIODIR		0x600
+#define RALINK_REG_PIOSET		0x630
+#define RALINK_REG_PIORESET		0x640
+
+#define RALINK_REG_PIO6332INT		0x694
+#define RALINK_REG_PIO6332EDGE		0x6A4
+#define RALINK_REG_PIO6332RENA		0x654
+#define RALINK_REG_PIO6332FENA		0x664
+#define RALINK_REG_PIO6332DATA		0x624
+#define RALINK_REG_PIO6332DIR		0x604
+#define RALINK_REG_PIO6332SET		0x634
+#define RALINK_REG_PIO6332RESET		0x644
+
+#define RALINK_REG_PIO9564INT		0x698
+#define RALINK_REG_PIO9564EDGE		0x6A8
+#define RALINK_REG_PIO9564RENA		0x658
+#define RALINK_REG_PIO9564FENA		0x668
+#define RALINK_REG_PIO9564DATA		0x628
+#define RALINK_REG_PIO9564DIR		0x608
+#define RALINK_REG_PIO9564SET		0x638
+#define RALINK_REG_PIO9564RESET		0x648
+
+static uint8_t* gpio_mmap_reg = NULL;
+static int gpio_mmap_fd = 0;
+
+#define LOCKFILE "/var/run/checknetstat.pid"        /* 锁文件 */
+
+#define LOCKMODE (S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH)
+
+#define POPENBUFLEN 256
+
+static void signal_interrupted (int signo);
+
+int				exit_flag = 0;
+int 			background = 0;
+int				start_delay = 0;
+int				lockfile;                  /* 锁文件的描述字 */
+
+void *shm = NULL;//分配的共享内存的原始首地址
+int shmid;//共享内存标识符
+
+void
+flock_reg ()
+{
+    char buf[16];
+    struct flock fl;
+    fl.l_start = 0;
+    fl.l_whence = SEEK_SET;
+    fl.l_len = 0;
+    fl.l_type = F_WRLCK;
+    fl.l_pid = getpid();
+
+    //阻塞式的加锁
+    if (fcntl (lockfile, F_SETLKW, &fl) < 0){
+        perror ("fcntl_reg");
+        exit(1);
+    }
+
+    //把pid写入锁文件
+    assert (0 == ftruncate (lockfile, 0) );
+    sprintf (buf, "%ld", (long)getpid());
+    assert (-1 != write (lockfile, buf, strlen(buf) + 1));
+}
+
+//https://baike.baidu.com/item/%E5%AE%88%E6%8A%A4%E8%BF%9B%E7%A8%8B?fr=aladdin
+/* 创建守护进程的步骤
+ * 1.创建子进程，终止父进程；
+ * 2.在子进程中创建新会话；
+ * 3.改变工作路劲；
+ * 4.重设文件创建掩码；
+ * 5.关闭文件描述符。
+ * */
+void
+daemon_init(void)
+{
+	pid_t	pid;
+    int     fd0;
+
+    //1.创建子进程，终止父进程；
+	if ( (pid = fork()) < 0)
+	    perror ("Fork");
+	else if (pid != 0) {	//父进程，则退出。
+        fprintf(stdout, "&&Info:  Forked background with PID: [%d]\n\n", pid);
+		exit(0);
+    }
+	//2.在子进程中创建新会话；
+	setsid();		/* become session leader */
+	//3.改变工作路劲；
+	assert (0 == chdir("/tmp"));		/* change working directory */
+	//4.重设文件创建掩码；
+	umask(0);		/* clear our file mode creation mask */
+    flock_reg ();
+
+    fd0 = open ("/dev/null", O_RDWR);
+    dup2 (fd0, STDIN_FILENO);
+    dup2 (fd0, STDERR_FILENO);
+    dup2 (fd0, STDOUT_FILENO);
+    close (fd0);
+}
+
+
+int
+program_running_check()
+{
+    struct flock fl;
+    fl.l_start = 0;
+    fl.l_whence = SEEK_SET;
+    fl.l_len = 0;
+    fl.l_type = F_WRLCK;
+
+    //尝试获得文件锁
+    if (fcntl (lockfile, F_GETLK, &fl) < 0){
+        perror ("fcntl_get");
+        exit(1);
+    }
+
+    if (exit_flag) {
+        if (fl.l_type != F_UNLCK) {
+            if ( kill (fl.l_pid, SIGINT) == -1 )
+                perror("kill");
+            fprintf (stdout, "&&Info: Kill Signal Sent to PID %d.\n", fl.l_pid);
+        }
+        else
+            fprintf (stderr, "&&Info: NO checknetstat Running.\n");
+        exit (EXIT_FAILURE);
+    }
+
+    //没有锁，则给文件加锁，否则返回锁着文件的进程pid
+    if (fl.l_type == F_UNLCK) {
+        flock_reg ();
+        return 0;
+    }
+
+    return fl.l_pid;
+}
+
+static void
+signal_interrupted (int signo)
+{
+    fprintf(stdout,"\n&&Info: USER Interrupted. \n");
+    exit_flag = 1;
+
+    close(gpio_mmap_fd);
+
+    //把共享内存从当前进程中分离
+	if(shmdt(shm) == -1)
+	{
+		fprintf(stderr, "shmdt failed\n");
+		exit(EXIT_FAILURE);
+	}
+
+/*
+	//删除共享内存
+	if(shmctl(shmid, IPC_RMID, 0) == -1)
+	{
+		fprintf(stderr, "shmctl(IPC_RMID) failed\n");
+		exit(EXIT_FAILURE);
+	}
+*/
+    exit(-1);
+}
+
+/*
+ * ===  FUNCTION  ======================================================================
+ *         Name:  init_arguments
+ *  Description:  初始化和解释命令行的字符串。getopt_long
+ * =====================================================================================
+ */
+void init_arguments(int argc, char *argv[]) {
+	//初始化并解释程序的启动参数
+	extern char *optarg;
+	int c;
+
+	while ((c = getopt(argc, argv, "bdflh")) != EOF) {
+		switch (c) {
+		case 'b':
+			background = 1;
+			break;
+		case 'd':
+			start_delay = 1;
+			break;
+		case 'f':
+			background = 0;
+			break;
+		case 'l':
+			exit_flag = 1;
+			break;
+		case '?':
+		case 'h':
+			printf(
+					"Usage: %s [-b <background>] [-d <startdelay>] [-f <foreground>] [-l <logout>]\n",
+					argv[0]);
+			exit(0);
+		}
+	}
+
+}
+
+
+static int gpio_mmap(void)
+{
+	if ((gpio_mmap_fd = open(MMAP_PATH, O_RDWR)) < 0) {
+		fprintf(stderr, "unable to open mmap file");
+		return -1;
+	}
+
+	gpio_mmap_reg = (uint8_t*) mmap(NULL, 1024, PROT_READ | PROT_WRITE,
+		MAP_FILE | MAP_SHARED, gpio_mmap_fd, 0x10000000);
+	if (gpio_mmap_reg == MAP_FAILED) {
+		perror("foo");
+		fprintf(stderr, "failed to mmap");
+		gpio_mmap_reg = NULL;
+		close(gpio_mmap_fd);
+		return -1;
+	}
+
+	return 0;
+}
+
+int mt76x8_gpio_get_pin(int pin)
+{
+	uint32_t tmp = 0;
+
+	/* MT7621, MT7628 */
+	if (pin <= 31) {
+		tmp = *(volatile uint32_t *)(gpio_mmap_reg + RALINK_REG_PIODATA);
+		tmp = (tmp >> pin) & 1u;
+	} else if (pin <= 63) {
+		tmp = *(volatile uint32_t *)(gpio_mmap_reg + RALINK_REG_PIO6332DATA);
+		tmp = (tmp >> (pin-32)) & 1u;
+	} else if (pin <= 95) {
+		tmp = *(volatile uint32_t *)(gpio_mmap_reg + RALINK_REG_PIO9564DATA);
+		tmp = (tmp >> (pin-64)) & 1u;
+		tmp = (tmp >> (pin-24)) & 1u;
+	}
+	return tmp;
+
+}
+
+void mt76x8_gpio_set_pin_direction(int pin, int is_output)
+{
+	uint32_t tmp;
+
+	/* MT7621, MT7628 */
+	if (pin <= 31) {
+		tmp = *(volatile uint32_t *)(gpio_mmap_reg + RALINK_REG_PIODIR);
+		if (is_output)
+			tmp |=  (1u << pin);
+		else
+			tmp &= ~(1u << pin);
+		*(volatile uint32_t *)(gpio_mmap_reg + RALINK_REG_PIODIR) = tmp;
+	} else if (pin <= 63) {
+		tmp = *(volatile uint32_t *)(gpio_mmap_reg + RALINK_REG_PIO6332DIR);
+		if (is_output)
+			tmp |=  (1u << (pin-32));
+		else
+			tmp &= ~(1u << (pin-32));
+		*(volatile uint32_t *)(gpio_mmap_reg + RALINK_REG_PIO6332DIR) = tmp;
+	} else if (pin <= 95) {
+		tmp = *(volatile uint32_t *)(gpio_mmap_reg + RALINK_REG_PIO9564DIR);
+		if (is_output)
+			tmp |=  (1u << (pin-64));
+		else
+			tmp &= ~(1u << (pin-64));
+		*(volatile uint32_t *)(gpio_mmap_reg + RALINK_REG_PIO9564DIR) = tmp;
+	}
+}
+
+void mt76x8_gpio_set_pin_value(int pin, int value)
+{
+	uint32_t tmp;
+
+	/* MT7621, MT7628 */
+	if (pin <= 31) {
+		tmp = (1u << pin);
+		if (value)
+			*(volatile uint32_t *)(gpio_mmap_reg + RALINK_REG_PIOSET) = tmp;
+		else
+			*(volatile uint32_t *)(gpio_mmap_reg + RALINK_REG_PIORESET) = tmp;
+	} else if (pin <= 63) {
+		tmp = (1u << (pin-32));
+		if (value)
+			*(volatile uint32_t *)(gpio_mmap_reg + RALINK_REG_PIO6332SET) = tmp;
+		else
+			*(volatile uint32_t *)(gpio_mmap_reg + RALINK_REG_PIO6332RESET) = tmp;
+	} else if (pin <= 95) {
+		tmp = (1u << (pin-64));
+		if (value)
+			*(volatile uint32_t *)(gpio_mmap_reg + RALINK_REG_PIO9564SET) = tmp;
+		else
+			*(volatile uint32_t *)(gpio_mmap_reg + RALINK_REG_PIO9564RESET) = tmp;
+	}
+}
+
+int uci_cmd(char* cmd, const char* def_val, char* res, int len){
+	FILE *stream;
+	//char buf[POPENBUFLEN];
+	int buf_len;
+	stream = popen( cmd , "r" );  //将“ls －l”命令的输出 通过管道读取（“r”参数）到FILE* stream
+	if (stream==NULL){
+		printf("\npopen error\n");
+		strcpy(res, def_val);
+		return -1;
+	}else{
+		memset(res,0,len);
+		if (fgets(res, len, stream)!=NULL){
+
+			buf_len = strlen(res);
+			if (buf_len>1 && res[buf_len-1]=='\n'){
+				res[buf_len-1]=0;
+				--buf_len;
+			}
+
+			printf("\nres:%s\n",res);
+			pclose( stream );
+			return buf_len;
+		}
+		strcpy(res, def_val);
+		pclose( stream );	//关闭流
+		return 0;
+	}
+
+}
+
+long get_sys_clock_ms()
+{
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);//打印出来的时间跟 cat /proc/uptime 第一个参数一样
+	return ts.tv_sec * 1000 + ts.tv_nsec/1000000;
+}
+
+int main(int argc, char *argv[])
+{
+
+    //初始化并解释程序的启动参数
+	init_arguments (argc, argv);
+
+    //打开锁文件
+    lockfile = open (LOCKFILE, O_RDWR | O_CREAT , LOCKMODE);
+    if (lockfile < 0){
+        perror ("Lockfile");
+        exit(1);
+    }
+
+    //检测程序的副本运行（文件锁）
+    int ins_pid;
+    if ( (ins_pid = program_running_check ()) ) {
+        fprintf(stderr,"@@ERROR: checknetstat Already Running with PID %d\n", ins_pid);
+        exit(EXIT_FAILURE);
+    }
+
+    signal (SIGINT, signal_interrupted);
+    signal (SIGTERM, signal_interrupted);
+
+    /* 是否由后台运行该程序 */
+    if (background) {
+		background = 0; /* 防止以后误触发 */
+		daemon_init(); //守护进程
+	}
+
+	char hostname[40];
+	char net_mode[20];
+	char net_apn[20];
+	char quectel_CM_cmd[64];
+
+	/* 从网页端获取到net_mode和net_apn */
+	uci_cmd("uci get devcfg.internet.mode", "wan", net_mode, 20);
+	uci_cmd("uci get devcfg.internet.apn", "3gnet", net_apn, 20);
+
+	printf("net_mode = %s, net_apn = %s\n", net_mode, net_apn);
+
+	strcpy(hostname,"www.qq.com");
+	sprintf(quectel_CM_cmd, "/root/quectel-CM -s %s &", net_apn);	//构建quectel-CM设置APN的启动命令
+
+	FILE *stream;
+	char buf[POPENBUFLEN];
+	char syscmd[256];
+	strcpy(syscmd,"ping -q -c 3 www.qq.com -w 5 | grep 'packet loss' | awk -F\"[ %]\" '{print $7}'");  //pppoe   username
+	printf("cmd:%s\n",syscmd);
+
+
+	long check_times = 0;
+	long fail_times = 0;
+	int loss_rate = 100;
+	int buf_len = 0;
+
+	int reset_count = 3;
+	if (start_delay){
+		if (strcmp(net_mode,"4g") == 0){
+			system(quectel_CM_cmd);
+			sleep(1);
+		}else{
+			system("killall quectel-CM");
+		}
+		reset_count = 0;
+	}
+
+	int status;
+	chdir("/root/lora/");
+	status = system("/root/lora/lora_pkt_fwd &");
+	if(status < 0) {
+		printf("start lora_ptk_pwd failed!\n");
+		exit(-1);
+	}
+	chdir("/");
+	printf("start lora_ptk_lwd successful!\n");
+
+	//int GPIONUM = 11;
+	int GPIONUM = 42;
+	if (gpio_mmap()){
+		exit(-1);
+	}
+
+	int net_state = 1;
+	int check_mqttgw_stat = 0;
+	mt76x8_gpio_set_pin_direction(2, 1);
+	mt76x8_gpio_set_pin_value(2, 0);
+
+	//http://blog.csdn.net/ljianhui/article/details/10253345
+	long *shared;//指向shm
+	//创建共享内存
+	shmid = shmget((key_t)76882017, sizeof(long), 0666|IPC_CREAT);
+	if(shmid == -1)
+	{
+		fprintf(stderr, "shmget failed\n");
+		exit(EXIT_FAILURE);
+	}
+	//将共享内存连接到当前进程的地址空间
+	shm = shmat(shmid, 0, 0);
+	if(shm == (void*)-1)
+	{
+		fprintf(stderr, "shmat failed\n");
+		exit(EXIT_FAILURE);
+	}
+	//printf("\nMemory attached at [%d]%X\n", shmid, (int*)shm);
+	//设置共享内存
+	shared = (long*)shm;
+
+	while(1){
+		loss_rate = 100;
+
+		stream = popen( syscmd , "r" );  //将“ls －l”命令的输出 通过管道读取（“r”参数）到FILE* stream
+		if (stream==NULL){
+			printf("\npopen error\n");
+		}else{	//获取ping命令返回的失败率
+			memset(buf,0,POPENBUFLEN);
+			if (fgets( buf, POPENBUFLEN, stream)!=NULL){
+
+				buf_len = strlen(buf);
+				if (buf_len>1 && buf[buf_len-1]=='\n'){
+					buf[buf_len-1]=0;
+					--buf_len;
+				}
+
+				printf("\nget buf:%s\n",buf);
+
+				if (buf_len==1 && buf[0]>='0' && buf[0]<='9' ){
+					 loss_rate = buf[0] - '0' ;
+				}else if (buf_len==2 && buf[0]>='0' && buf[0]<='9' && buf[1]>='0' && buf[1]<='9' ){
+					loss_rate = (buf[0] - '0')*10 + (buf[1] - '0');
+				}
+			}
+			pclose( stream );
+
+		}
+
+		printf("[%ld/%ld]loss_rate:[%d]\n",fail_times,++check_times,loss_rate);
+
+		if (loss_rate>50){	//失败率大于50%
+			++fail_times;
+
+			if (net_state == 1){	//如果网络连接着，则标记网络状态断开
+				mt76x8_gpio_set_pin_direction(2, 1);
+				mt76x8_gpio_set_pin_value(2, 1);
+				net_state = 0;
+			}
+
+			//ifup wan4
+			if (reset_count>=3){
+				//system("ifup wan4");
+				while(1){
+					printf ("network restart.\n");
+
+					if (strcmp(net_mode,"4g") == 0){
+
+						//kill quectel-CM
+						system("killall quectel-CM");	//杀死quectel-CM进程
+						sleep(1);
+
+						//通过4G模块的复位引脚GPIO0(11)复位模块
+						mt76x8_gpio_set_pin_direction(GPIONUM, 1);
+						mt76x8_gpio_set_pin_value(GPIONUM,0);
+						usleep(300*1000);
+						mt76x8_gpio_set_pin_value(GPIONUM, 1);
+
+						int check_count;
+						for(check_count = 0; check_count < 30; check_count++){
+							sleep(1);
+							if (access("/dev/qcqmi1", 0) == 0){
+
+								break;
+							}
+						}
+						if (check_count >= 30){
+							continue;
+						}
+					}
+
+					system("/etc/init.d/network restart");	//重启系统网络
+
+					//start quectel-CM
+					if (strcmp(net_mode,"4g") == 0){
+						system(quectel_CM_cmd);		//启动quectel_CM进程
+					}
+
+					//sleep(5);
+
+					reset_count = 0;
+					break;
+				}
+			}else{
+				reset_count++;
+			}
+		}else{
+			//if (reset_count<3){
+			//}
+			//reset_count++;
+			reset_count = 0;
+			if (net_state == 0){
+				mt76x8_gpio_set_pin_direction(2, 1);
+				mt76x8_gpio_set_pin_value(2, 0);
+				net_state = 1;	//标志网络已经连接上了
+				check_mqttgw_stat = 0;
+			}
+
+		}
+
+		printf("clock: %ld === %ld\n", *shared, get_sys_clock_ms());
+		if (net_state == 1){
+			if (check_mqttgw_stat){
+				if ((get_sys_clock_ms() - *shared) > 10*1000){
+					printf("restart mqttgw\n");
+					system("/root/mqttgw -l");
+					sleep(2);
+					system("/root/mqttgw -b");
+
+					printf("restart lora_pkt_fwd\n");
+					//system("/root/lora/lora_pkt_fwd -l");
+					//killall lora_pkt_fwd
+					system("killall lora_pkt_fwd");
+					sleep(2);
+					chdir("/root/lora/");
+					status = system("/root/lora/lora_pkt_fwd &");
+					if(status < 0) {
+						printf("start lora_ptk_pwd failed!\n");
+						exit(-1);
+					}
+					chdir("/");
+					printf("start lora_ptk_lwd successful!\n");
+				}
+			}else{
+				check_mqttgw_stat = 1;
+			}
+
+		}
+
+		sleep(30);
+
+	}
+
+    printf ("Exit.\n");
+    exit(0);
+}
